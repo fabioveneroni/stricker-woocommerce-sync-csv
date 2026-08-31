@@ -31,7 +31,9 @@ class SWCS_CSV {
         if ( false === $header ) { fclose( $handle ); return new WP_Error( 'csv_header', 'Não foi possível identificar o cabeçalho.' ); }
         $header = self::normalise_header( $header ); $rows = array(); $start = max( 0, ( (int) $page - 1 ) * (int) $per_page ); $index = 0;
         while ( false !== ( $row = fgetcsv( $handle, 0, $delimiter ) ) ) { if ( count( $row ) === 1 && '' === trim( (string) $row[0] ) ) continue; if ( $index++ < $start ) continue; $rows[] = self::combine_row( $header, $row ); if ( count( $rows ) >= $per_page ) break; }
-        fclose( $handle ); return array( 'header' => $header, 'rows' => $rows, 'page' => (int) $page, 'per_page' => (int) $per_page, 'delimiter' => $delimiter );
+        fclose( $handle );
+        $analysis = get_option( 'swcs_catalog_' . $dataset . '_analysis', array() );
+        return array( 'header' => $header, 'rows' => $rows, 'page' => (int) $page, 'per_page' => (int) $per_page, 'total' => (int) ( $analysis['records'] ?? 0 ), 'delimiter' => $delimiter );
     }
 
     private static function detect_delimiter( $line ) { $best = ','; $count = 0; foreach ( array( ';', ',', "\t", '|' ) as $candidate ) { $n = substr_count( $line, $candidate ); if ( $n > $count ) { $best = $candidate; $count = $n; } } return $best; }
