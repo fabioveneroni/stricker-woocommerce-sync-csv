@@ -13,17 +13,17 @@ class SWCS_Admin {
     }
 
     public static function menu() {
-        add_menu_page( 'Stricker Catalog Sync', 'Stricker Sync', 'manage_woocommerce', 'swcs', array( __CLASS__, 'page' ), 'dashicons-update', 56 );
+        add_menu_page( 'Stricker Catalog Sync', 'Stricker Sync', 'manage_options', 'swcs', array( __CLASS__, 'page' ), 'dashicons-update', 56 );
     }
 
     public static function save_settings() {
-        if ( ! current_user_can( 'manage_woocommerce' ) || ! check_admin_referer( 'swcs_save_settings' ) ) { wp_die( 'Acesso negado.' ); }
+        if ( ! current_user_can( 'manage_options' ) || ! check_admin_referer( 'swcs_save_settings' ) ) { wp_die( 'Acesso negado.' ); }
         update_option( 'swcs_access_key', sanitize_text_field( wp_unslash( $_POST['access_key'] ?? '' ) ) );
         wp_safe_redirect( admin_url( 'admin.php?page=swcs&saved=1' ) ); exit;
     }
 
     public static function download() {
-        if ( ! current_user_can( 'manage_woocommerce' ) || ! check_admin_referer( 'swcs_download' ) ) { wp_die( 'Acesso negado.' ); }
+        if ( ! current_user_can( 'manage_options' ) || ! check_admin_referer( 'swcs_download' ) ) { wp_die( 'Acesso negado.' ); }
         $dataset = sanitize_key( wp_unslash( $_POST['dataset'] ?? '' ) );
         $result = SWCS_API::download_csv( $dataset, 'PT' );
         $args = array( 'page' => 'swcs', 'dataset' => $dataset );
