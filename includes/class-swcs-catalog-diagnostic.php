@@ -26,7 +26,7 @@ class SWCS_Catalog_Diagnostic {
 
     public static function get_product( $reference ) {
         $status = get_option( 'swcs_catalog_products_status', array() ); if ( empty( $status['path'] ) || ! is_readable( $status['path'] ) ) return new WP_Error( 'products_missing', 'O arquivo Products CSV ainda não foi baixado.' );
-        $handle = fopen( $status['path'], 'rb' ); if ( ! $handle ) return new WP_Error( 'products_open', 'Não foi possível abrir o Products CSV.' ); $first = fgets( $handle ); rewind( $handle ); $delimiter = SWCS_CSV::detect_for_diagnostic( $first ); $header = self::normalise_header( fgetcsv( $handle, 0, $delimiter ) ); $types = self::load_product_types();
+        $handle = fopen( $status['path'], 'rb' ); if ( ! $handle ) return new WP_Error( 'products_open', 'Não foi possível abrir o Products CSV.' ); $first = fgets( $handle ); if ( false === $first ) { fclose( $handle ); return new WP_Error( 'products_empty', 'O Products CSV está vazio.' ); } rewind( $handle ); $delimiter = SWCS_CSV::detect_for_diagnostic( $first ); $header = self::normalise_header( fgetcsv( $handle, 0, $delimiter ) ); $types = self::load_product_types();
         while ( false !== ( $row = fgetcsv( $handle, 0, $delimiter ) ) ) { $product = self::combine_row( $header, $row ); if ( self::value( $product, array( 'ProdReference', 'ProductReference', 'Reference', 'SKU' ) ) === (string) $reference ) { fclose( $handle ); return self::diagnose_product( $product, $types, true ); } }
         fclose( $handle ); return new WP_Error( 'product_not_found', 'Produto não encontrado.' );
     }
@@ -34,9 +34,48 @@ class SWCS_Catalog_Diagnostic {
     private static function diagnose_product( $p, $types, $full = false ) {
         $reference = self::value( $p, array( 'ProdReference', 'ProductReference', 'Reference', 'SKU' ) ); $type_code = self::value( $p, array( 'TypeCode', 'ProdTypeCode', 'ProductTypeCode' ) ); $sub_code = self::value( $p, array( 'SubTypeCode', 'ProdSubTypeCode', 'ProductSubTypeCode' ) );
         $colors = self::list_value( $p, array( 'Colors', 'Color', 'ColorCodes' ) ); $sizes = self::list_value( $p, array( 'Sizes', 'Size', 'SizeCodes' ) ); $capacity = self::list_value( $p, array( 'Capacitys', 'Capacities', 'Capacity' ) );
-        $has_colors = self::bool_value( self::value( $p, array( 'HasColors' ) ) ) || ! empty( $colors ); $has_sizes = self::bool_value( self::value( $p, array( 'HasSizes' ) ) ) || ! empty( $sizes ); $has_capacity = self::bool_value( self::value( $p, array( 'HasCapacitys', 'HasCapacities' ) ) ) || ! empty( $capacity ); $variable = $has_colors || $has_sizes || $has_capacity;
-        $result = array( 'reference'=>$reference, 'name'=>self::value($p,array('Name','ProductName')), 'description'=>self::value($p,array('Description')), 'short_description'=>self::value($p,array('ShortDescription')), 'type_code'=>$type_code, 'type_name'=>isset($types['types'][$type_code])?$types['types'][$type_code]:'', 'subtype_code'=>$sub_code, 'subtype_name'=>isset($types['subtypes'][$type_code][$sub_code])?$types['subtypes'][$type_code][$sub_code]:'', 'colors'=>$colors, 'sizes'=>$sizes, 'capacity'=>$capacity, 'has_colors'=>$has_colors, 'has_sizes'=>$has_sizes, 'has_capacity'=>$has_capacity, 'woocommerce_type'=>$variable?'Variável (diagnóstico)':'Simples (diagnóstico)', 'raw_flags'=>array('IsTextil'=>self::value($p,array('IsTextil')),'HasColors'=>self::value($p,array('HasColors')),'HasSizes'=>self::value($p,array('HasSizes')),'HasCapacitys'=>self::value($p,array('HasCapacitys')),'CombinedSizes'=>self::value($p,array('CombinedSizes'))) );
+        $has_colors = self::bool_value( self::value( $p, array( 'HasColors' ) ) ) || ! empty( $colors ); $has_sizes = self::bool_value( self::value( $p, array( 'HasSizes' ) ) ) || ! empty( $sizes ); $has_capacity = self::bool_value( self::value( $p, array( 'HasCapacitys', 'HasCapacities' ) ) ) || ! empty( $capacity );
+        $cross = self::cross_dataset_variants( $reference );
+        $multi = ( count( $colors ) > 1 || count( $sizes ) > 1 || count( $capacity ) > 1 );
+        $cross_values = ! empty( $cross['variant_values'] );
+        $variable = $multi || $cross['variant_count'] > 1 || $cross_values;
+        $result = array( 'reference'=>$reference, 'name'=>self::value($p,array('Name','ProductName')), 'description'=>self::value($p,array('Description')), 'short_description'=>self::value($p,array('ShortDescription')), 'type_code'=>$type_code, 'type_name'=>isset($types['types'][$type_code])?$types['types'][$type_code]:'', 'subtype_code'=>$sub_code, 'subtype_name'=>isset($types['subtypes'][$type_code][$sub_code])?$types['subtypes'][$type_code][$sub_code]:'', 'colors'=>$colors, 'sizes'=>$sizes, 'capacity'=>$capacity, 'has_colors'=>$has_colors, 'has_sizes'=>$has_sizes, 'has_capacity'=>$has_capacity, 'variant_count'=>$cross['variant_count'], 'variant_values'=>$cross['variant_values'], 'stock_count'=>$cross['stock_count'], 'stock_available'=>$cross['stock_available'], 'variant_sources'=>$cross['sources'], 'woocommerce_type'=>$variable?'Variável (diagnóstico)':'Simples (diagnóstico)', 'raw_flags'=>array('IsTextil'=>self::value($p,array('IsTextil')),'HasColors'=>self::value($p,array('HasColors')),'HasSizes'=>self::value($p,array('HasSizes')),'HasCapacitys'=>self::value($p,array('HasCapacitys')),'CombinedSizes'=>self::value($p,array('CombinedSizes'))) );
         if ( $full ) $result['raw'] = $p; return $result;
+    }
+
+    /** Crosses Products with the locally downloaded datasets. The source files
+     * are intentionally read-only; this method does not create WooCommerce data. */
+    private static function cross_dataset_variants( $reference ) {
+        $out = array( 'variant_count'=>0, 'stock_count'=>0, 'stock_available'=>0, 'variant_values'=>array(), 'sources'=>array() );
+        foreach ( array( 'optionalscomplete', 'optionals', 'stocks' ) as $dataset ) {
+            $status = get_option( 'swcs_catalog_' . $dataset . '_status', array() );
+            if ( empty( $status['path'] ) || ! is_readable( $status['path'] ) ) continue;
+            $rows = self::find_rows_by_reference( $status['path'], $reference, $dataset );
+            if ( empty( $rows ) ) continue;
+            $out['sources'][] = $dataset;
+            if ( 'stocks' === $dataset ) {
+                $out['stock_count'] += count( $rows );
+                foreach ( $rows as $row ) {
+                    $stock = self::value( $row, array( 'Stock', 'Quantity', 'Available', 'AvailableQuantity', 'Qty', 'StockQuantity' ) );
+                    if ( '' !== $stock && ( is_numeric( str_replace( ',', '.', $stock ) ) ? (float) str_replace( ',', '.', $stock ) > 0 : self::bool_value( $stock ) ) ) $out['stock_available']++;
+                }
+            } else {
+                $out['variant_count'] += count( $rows );
+                foreach ( $rows as $row ) {
+                    foreach ( array( 'Color', 'Colors', 'Size', 'Sizes', 'Capacity', 'Capacitys', 'SKU', 'Sku', 'Reference', 'VariantCode', 'OptionCode' ) as $key ) {
+                        if ( array_key_exists( $key, $row ) && '' !== trim( (string) $row[$key] ) ) $out['variant_values'][$key] = array_unique( array_merge( isset($out['variant_values'][$key]) ? $out['variant_values'][$key] : array(), self::list_value( $row, array( $key ) ) ) );
+                    }
+                }
+            }
+        }
+        return $out;
+    }
+
+    private static function find_rows_by_reference( $path, $reference, $dataset ) {
+        $h = fopen( $path, 'rb' ); if ( ! $h ) return array(); $first = fgets( $h ); if ( false === $first ) { fclose($h); return array(); } rewind($h); $delimiter = SWCS_CSV::detect_for_diagnostic($first); $header = self::normalise_header(fgetcsv($h,0,$delimiter));
+        $reference_keys = array( 'ProdReference','ProductReference','Reference','SKU','Sku','ProdRef','ProductRef' ); $result=array();
+        while(false!==($row=fgetcsv($h,0,$delimiter))){ $r=self::combine_row($header,$row); $found=false; foreach($reference_keys as $key){ if(array_key_exists($key,$r) && (string)trim($r[$key])===(string)$reference){$found=true;break;} } if($found)$result[]=$r; }
+        fclose($h); return $result;
     }
 
     private static function load_product_types() {
