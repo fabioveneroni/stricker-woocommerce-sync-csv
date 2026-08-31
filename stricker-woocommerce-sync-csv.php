@@ -16,6 +16,7 @@ require_once SWCS_DIR . 'includes/class-swcs-api.php';
 require_once SWCS_DIR . 'includes/class-swcs-csv.php';
 require_once SWCS_DIR . 'includes/class-swcs-catalog-diagnostic.php';
 require_once SWCS_DIR . 'includes/class-swcs-importer.php';
+require_once SWCS_DIR . 'includes/class-swcs-import-action.php';
 require_once SWCS_DIR . 'includes/class-swcs-admin.php';
 register_activation_hook( __FILE__, array( 'SWCS_Admin', 'activate' ) );
 add_action( 'plugins_loaded', array( 'SWCS_Admin', 'init' ) );
