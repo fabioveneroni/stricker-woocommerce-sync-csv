@@ -34,6 +34,9 @@ class SWCS_CSV {
         fclose( $handle ); return array( 'header' => $header, 'rows' => $rows, 'page' => (int) $page, 'per_page' => (int) $per_page, 'delimiter' => $delimiter );
     }
 
+    /** Public delimiter helper for cross-dataset catalog readers. */
+    public static function detect_for_diagnostic( $line ) { return self::detect_delimiter( $line ); }
+
     private static function detect_delimiter( $line ) { $best = ','; $count = 0; foreach ( array( ';', ',', "\t", '|' ) as $candidate ) { $n = substr_count( $line, $candidate ); if ( $n > $count ) { $best = $candidate; $count = $n; } } return $best; }
     private static function detect_encoding( $path ) { $sample = file_get_contents( $path, false, null, 0, 4096 ); if ( substr( $sample, 0, 3 ) === "\xEF\xBB\xBF" ) return 'UTF-8 with BOM'; if ( function_exists( 'mb_detect_encoding' ) ) { $detected = mb_detect_encoding( $sample, array( 'UTF-8', 'Windows-1252', 'ISO-8859-1' ), true ); if ( $detected ) return $detected; } return 'Não identificado'; }
     private static function combine_row( $header, $row ) { $row = array_pad( $row, count( $header ), '' ); if ( count( $row ) > count( $header ) ) $row = array_slice( $row, 0, count( $header ) ); return array_combine( $header, $row ); }
