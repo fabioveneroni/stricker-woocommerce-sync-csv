@@ -3,13 +3,27 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
 class SWCS_Admin {
  public static function init(){ add_action('admin_menu',array(__CLASS__,'menu')); add_action('admin_post_swcs_save_settings',array(__CLASS__,'save_settings')); add_action('admin_post_swcs_download',array(__CLASS__,'download')); add_action('admin_post_swcs_analyse',array(__CLASS__,'analyse')); }
  public static function activate(){ if(false===get_option('swcs_access_key',false)) add_option('swcs_access_key',''); }
- public static function menu(){ add_menu_page('Stricker Catalog Sync','Stricker Sync','manage_options','swcs',array(__CLASS__,'page'),'dashicons-update',56); }
+ public static function menu(){ add_menu_page('Stricker WooCommerce Catalog Sync','Stricker Sync','manage_options','swcs',array(__CLASS__,'page'),'dashicons-update',56); }
  public static function save_settings(){ if(!current_user_can('manage_options')||!check_admin_referer('swcs_save_settings')) wp_die('Acesso negado.'); update_option('swcs_access_key',sanitize_text_field(wp_unslash($_POST['access_key']??''))); wp_safe_redirect(admin_url('admin.php?page=swcs&saved=1')); exit; }
  public static function download(){ if(!current_user_can('manage_options')||!check_admin_referer('swcs_download')) wp_die('Acesso negado.'); $dataset=sanitize_key(wp_unslash($_POST['dataset']??'')); $result=SWCS_API::download_csv($dataset,'PT'); $args=array('page'=>'swcs','dataset'=>$dataset); if(is_wp_error($result)) $args['error']=rawurlencode($result->get_error_message()); else $args['success']=1; wp_safe_redirect(add_query_arg($args,admin_url('admin.php'))); exit; }
  public static function analyse(){ if(!current_user_can('manage_options')||!check_admin_referer('swcs_analyse')) wp_die('Acesso negado.'); $dataset=sanitize_key(wp_unslash($_POST['dataset']??'')); $result=SWCS_CSV::analyse($dataset); $args=array('page'=>'swcs','dataset'=>$dataset); if(is_wp_error($result)) $args['analysis_error']=rawurlencode($result->get_error_message()); else $args['analysed']=1; wp_safe_redirect(add_query_arg($args,admin_url('admin.php'))); exit; }
+ private static function product_catalog(){
+  $analysis=get_option('swcs_catalog_products_analysis',array());
+  if(empty($analysis['records'])) return;
+  $page=max(1,(int)($_GET['product_page']??1)); $per_page=25;
+  $result=SWCS_CSV::read_page('products',$page,$per_page); if(is_wp_error($result)){ echo '<div class="notice notice-error"><p>'.esc_html($result->get_error_message()).'</p></div>'; return; }
+  $headers=$result['header']; $rows=$result['rows'];
+  $preferred=array('ProdReference','Name','Description','ShortDescription','TypeCode','SubTypeCode'); $shown=array(); foreach($preferred as $field) if(in_array($field,$headers,true)) $shown[]=$field; if(empty($shown)) $shown=array_slice($headers,0,5);
+  $total=(int)$result['total']; $pages=max(1,(int)ceil($total/$per_page));
+  echo '<h2 style="margin-top:30px">Catálogo de Produtos</h2><p>'.esc_html(number_format_i18n($total)).' produtos disponíveis no CSV. Esta etapa é apenas de visualização; nenhum produto é criado ou alterado no WooCommerce.</p>';
+  echo '<table class="widefat striped"><thead><tr><th style="width:40px">#</th>'; foreach($shown as $h) echo '<th>'.esc_html($h).'</th>'; echo '</tr></thead><tbody>';
+  $number=(($page-1)*$per_page)+1; foreach($rows as $row){ echo '<tr><td>'.esc_html($number++).'</td>'; foreach($shown as $h){ $value=(string)($row[$h]??''); if(strlen($value)>180)$value=substr($value,0,180).'…'; echo '<td>'.esc_html($value).'</td>'; } echo '</tr>'; }
+  echo '</tbody></table>';
+  if($pages>1){ echo '<div class="tablenav"><div class="tablenav-pages" style="margin:15px 0">'; for($p=1;$p<=$pages;$p++){ if($p===1||$p===$pages||abs($p-$page)<=2){ $url=add_query_arg(array('page'=>'swcs','product_page'=>$p),admin_url('admin.php')); echo $p===$page?' <strong style="margin-right:6px">'.esc_html($p).'</strong> ':' <a style="margin-right:6px" href="'.esc_url($url).'">'.esc_html($p).'</a> '; } elseif($p===$page-3||$p===$page+3){ echo '… '; } } echo '</div></div>'; }
+ }
  public static function page(){
   $datasets=array('producttypes'=>'Product Types','products'=>'Products','optionals'=>'Optionals','optionalsPrice'=>'Optionals Price','optionalscomplete'=>'Optionals Complete','customizationOptions'=>'Customization Options','customizationTables'=>'Customization Tables','colors'=>'Colors','stocks'=>'Stocks'); ?>
-  <div class="wrap"><h1>Stricker WooCommerce Catalog Sync</h1>
+  <div class="wrap"><h1>Stricker WooCommerce Catalog Sync CSV <small style="font-size:12px;font-weight:normal">v<?php echo esc_html(SWCS_VERSION);?></small></h1>
   <?php if(isset($_GET['saved'])):?><div class="notice notice-success"><p>Access key salva com sucesso.</p></div><?php endif;?>
   <?php if(isset($_GET['success'])):?><div class="notice notice-success"><p>Download de <?php echo esc_html($_GET['dataset']??'');?> concluído com sucesso.</p></div><?php endif;?>
   <?php if(isset($_GET['analysed'])):?><div class="notice notice-success"><p>Análise do CSV concluída.</p></div><?php endif;?>
@@ -20,5 +34,7 @@ class SWCS_Admin {
   <?php foreach($datasets as $key=>$label): $status=get_option('swcs_catalog_'.$key.'_status',array()); $analysis=get_option('swcs_catalog_'.$key.'_analysis',array()); ?>
    <tr><td><strong><?php echo esc_html($label);?></strong></td><td><?php echo !empty($status['completed'])?'Concluído em '.esc_html($status['completed']).' ('.esc_html(size_format((int)($status['size']??0))).')':'Ainda não baixado';?></td><td><?php if(!empty($status['completed'])):?><form style="display:inline-block;margin-right:6px" method="post" action="<?php echo esc_url(admin_url('admin-post.php'));?>"><?php wp_nonce_field('swcs_analyse');?><input type="hidden" name="action" value="swcs_analyse"><input type="hidden" name="dataset" value="<?php echo esc_attr($key);?>"><?php submit_button('Analisar CSV','secondary','submit',false);?></form><?php endif;?><form style="display:inline-block" method="post" action="<?php echo esc_url(admin_url('admin-post.php'));?>"><?php wp_nonce_field('swcs_download');?><input type="hidden" name="action" value="swcs_download"><input type="hidden" name="dataset" value="<?php echo esc_attr($key);?>"><?php submit_button('Baixar CSV','secondary','submit',false);?></form></td></tr>
    <?php if(!empty($analysis)):?><tr><td colspan="3"><div style="padding:10px 15px;background:#f6f7f7"><strong>Análise:</strong> <?php echo esc_html(number_format_i18n((int)$analysis['records']));?> registros · <?php echo esc_html((int)$analysis['columns']);?> colunas · delimitador <code><?php echo esc_html($analysis['delimiter']==="\t"?'TAB':$analysis['delimiter']);?></code> · <?php echo esc_html($analysis['encoding']);?> · analisado em <?php echo esc_html($analysis['analysed']);?><br><strong>Colunas:</strong> <?php echo esc_html(implode(', ',$analysis['header']));?><details style="margin-top:8px"><summary>Ver amostra dos primeiros 10 registros</summary><pre style="max-height:350px;overflow:auto;background:#fff;padding:10px"><?php echo esc_html(wp_json_encode($analysis['sample'],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));?></pre></details></div></td></tr><?php endif;?>
-  <?php endforeach;?></tbody></table></div><?php }
+  <?php endforeach;?></tbody></table>
+  <?php self::product_catalog(); ?>
+  </div><?php }
 }
