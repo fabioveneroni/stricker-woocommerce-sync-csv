@@ -36,26 +36,34 @@ class SWCS_Importer {
         $type = SWCS_Mapper::classification( $product, $variations );
 
         // The Stricker reference is the authoritative parent identity. Prefer our
-        // metadata over a WooCommerce SKU lookup so that an old/test SKU cannot
-        // accidentally create or update the wrong object.
+        // metadata over a WooCommerce SKU lookup so old/test records are reused.
         $existing_id = self::find_parent_by_stricker_reference( $reference );
+        if ( is_wp_error( $existing_id ) ) { return $existing_id; }
         if ( ! $existing_id ) {
             $existing_id = wc_get_product_id_by_sku( $reference );
         }
 
         if ( $existing_id ) {
+            $post_type = get_post_type( $existing_id );
+            if ( 'product' !== $post_type ) {
+                return new WP_Error( 'parent_sku_conflict', 'O SKU ' . $reference . ' está associado a outro tipo de objeto WooCommerce.' );
+            }
+
+            // If the existing test/product record is simple but Stricker says it
+            // has variation dimensions, convert the product type before creating
+            // or updating variations. The existing product ID is preserved.
+            if ( 'variable' === $type ) {
+                self::ensure_variable_product_type( $existing_id );
+            }
+
             $wc_product = wc_get_product( $existing_id );
         } else {
             $wc_product = ( 'variable' === $type ) ? new WC_Product_Variable() : new WC_Product_Simple();
         }
-        if ( ! $wc_product ) { return new WP_Error( 'product_load_failed', 'Não foi possível carregar/criar o produto WooCommerce.' ); }
-
-        if ( $wc_product->get_id() && 'product' !== get_post_type( $wc_product->get_id() ) ) {
-            return new WP_Error( 'parent_sku_conflict', 'O SKU ' . $reference . ' já está associado a outro tipo de objeto WooCommerce.' );
+        if ( ! $wc_product ) {
+            return new WP_Error( 'product_load_failed', 'Não foi possível carregar/criar o produto WooCommerce para a referência ' . $reference . '.' );
         }
 
-        // A product with the same Stricker reference must be unique. If stale
-        // metadata somehow points to a variation, abort instead of corrupting it.
         $wc_product->set_name( self::clean_name( $product['name'], $reference ) );
         $wc_product->set_description( wp_kses_post( $product['description'] ) );
         $wc_product->set_short_description( wp_kses_post( $product['short_description'] ) );
@@ -73,9 +81,9 @@ class SWCS_Importer {
         try {
             $id = $wc_product->save();
         } catch ( WC_Data_Exception $e ) {
-            return new WP_Error( 'product_save_exception', $e->getMessage() );
+            return new WP_Error( 'product_save_exception', 'Não foi possível salvar o produto ' . $reference . ': ' . $e->getMessage() );
         }
-        if ( ! $id ) { return new WP_Error( 'product_save_failed', 'Falha ao salvar o produto WooCommerce.' ); }
+        if ( ! $id ) { return new WP_Error( 'product_save_failed', 'Falha ao salvar o produto WooCommerce ' . $reference . '.' ); }
 
         self::assign_categories( $id, $product );
         self::save_metadata( $id, $product );
@@ -83,13 +91,27 @@ class SWCS_Importer {
         $created_variations = 0;
         if ( 'variable' === $type ) {
             self::configure_variable_attributes( $wc_product, $variations );
-            $wc_product->save();
+            try {
+                $wc_product->save();
+            } catch ( WC_Data_Exception $e ) {
+                return new WP_Error( 'variable_product_save_exception', 'Não foi possível salvar os atributos do produto ' . $reference . ': ' . $e->getMessage() );
+            }
             $variation_result = self::sync_variations( $id, $variations );
             if ( is_wp_error( $variation_result ) ) { return $variation_result; }
             $created_variations = $variation_result;
         }
 
         return array( 'product_id' => $id, 'type' => $type, 'variations' => $created_variations );
+    }
+
+    private static function ensure_variable_product_type( $product_id ) {
+        $current_type = wp_get_object_terms( $product_id, 'product_type', array( 'fields' => 'slugs' ) );
+        if ( ! is_wp_error( $current_type ) && in_array( 'variable', $current_type, true ) ) {
+            return;
+        }
+        wp_set_object_terms( $product_id, 'variable', 'product_type', false );
+        clean_post_cache( $product_id );
+        wc_delete_product_transients( $product_id );
     }
 
     private static function find_parent_by_stricker_reference( $reference ) {
@@ -242,8 +264,6 @@ class SWCS_Importer {
                 if ( is_wp_error( $variation_id ) ) { return $variation_id; }
             }
 
-            // Only use the global WooCommerce SKU lookup as a safety check. Never
-            // adopt an unrelated product/variation just because its WC SKU matches.
             if ( ! $variation_id ) {
                 $global_id = wc_get_product_id_by_sku( $sku );
                 if ( $global_id ) {
