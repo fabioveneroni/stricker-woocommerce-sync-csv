@@ -38,6 +38,11 @@ class SWCS_Importer {
         }
         if ( ! $wc_product ) { return new WP_Error( 'product_load_failed', 'Não foi possível carregar/criar o produto WooCommerce.' ); }
 
+        // If a product with this SKU exists but is not the expected parent, do not overwrite it.
+        if ( $wc_product->get_id() && 'product' !== get_post_type( $wc_product->get_id() ) ) {
+            return new WP_Error( 'parent_sku_conflict', 'O SKU ' . $reference . ' já está associado a outro tipo de objeto WooCommerce.' );
+        }
+
         $wc_product->set_name( self::clean_name( $product['name'], $reference ) );
         $wc_product->set_description( wp_kses_post( $product['description'] ) );
         $wc_product->set_short_description( wp_kses_post( $product['short_description'] ) );
@@ -52,7 +57,11 @@ class SWCS_Importer {
             $wc_product->set_stock_status( ! empty( $product['stock_out'] ) ? 'outofstock' : 'instock' );
         }
 
-        $id = $wc_product->save();
+        try {
+            $id = $wc_product->save();
+        } catch ( WC_Data_Exception $e ) {
+            return new WP_Error( 'product_save_exception', $e->getMessage() );
+        }
         if ( ! $id ) { return new WP_Error( 'product_save_failed', 'Falha ao salvar o produto WooCommerce.' ); }
 
         self::assign_categories( $id, $product );
@@ -62,7 +71,9 @@ class SWCS_Importer {
         if ( 'variable' === $type ) {
             self::configure_variable_attributes( $wc_product, $variations );
             $wc_product->save();
-            $created_variations = self::sync_variations( $id, $variations );
+            $variation_result = self::sync_variations( $id, $variations );
+            if ( is_wp_error( $variation_result ) ) { return $variation_result; }
+            $created_variations = $variation_result;
         }
 
         return array( 'product_id' => $id, 'type' => $type, 'variations' => $created_variations );
@@ -143,14 +154,11 @@ class SWCS_Importer {
     }
 
     private static function configure_variable_attributes( $product, $variations ) {
-        $sets = array(
-            'Color' => array(),
-            'Size' => array(),
-            'Capacity' => array(),
-        );
+        $sets = array( 'Color' => array(), 'Size' => array(), 'Capacity' => array() );
         foreach ( $variations as $variation ) {
             foreach ( $sets as $key => &$values ) {
-                if ( ! empty( $variation[ strtolower( $key ) ] ) ) { $values[] = trim( $variation[ strtolower( $key ) ] ); }
+                $field = strtolower( $key );
+                if ( ! empty( $variation[ $field ] ) ) { $values[] = trim( $variation[ $field ] ); }
             }
             unset( $values );
         }
@@ -158,32 +166,66 @@ class SWCS_Importer {
         foreach ( $sets as $name => $values ) {
             $values = array_values( array_unique( array_filter( $values ) ) );
             if ( empty( $values ) ) { continue; }
-            $attributes[ sanitize_title( $name ) ] = array( 'name' => $name, 'options' => $values, 'visible' => true, 'variation' => true );
+            $attributes[] = array( 'name' => $name, 'options' => $values );
         }
-        $product->set_attributes( array_map( function( $data ) { $attribute = new WC_Product_Attribute(); $attribute->set_name( $data['name'] ); $attribute->set_options( $data['options'] ); $attribute->set_visible( true ); $attribute->set_variation( true ); return $attribute; }, array_values( $attributes ) ) );
+        $product->set_attributes( array_map( function( $data ) {
+            $attribute = new WC_Product_Attribute();
+            $attribute->set_name( $data['name'] );
+            $attribute->set_options( $data['options'] );
+            $attribute->set_visible( true );
+            $attribute->set_variation( true );
+            return $attribute;
+        }, $attributes ) );
     }
 
     private static function sync_variations( $product_id, $variations ) {
         $count = 0;
-        $existing = array();
+        $existing_children = array();
         $children = get_posts( array( 'post_type' => 'product_variation', 'post_parent' => $product_id, 'post_status' => 'any', 'numberposts' => -1, 'fields' => 'ids' ) );
-        foreach ( $children as $child_id ) { $sku = get_post_meta( $child_id, '_sku', true ); if ( $sku ) { $existing[ $sku ] = $child_id; } }
+        foreach ( $children as $child_id ) {
+            $sku = get_post_meta( $child_id, '_sku', true );
+            if ( $sku ) { $existing_children[ $sku ] = $child_id; }
+        }
+
         foreach ( $variations as $variation ) {
             if ( empty( $variation['sku'] ) ) { continue; }
-            $variation_id = isset( $existing[ $variation['sku'] ] ) ? $existing[ $variation['sku'] ] : 0;
+
+            $sku = trim( (string) $variation['sku'] );
+            $variation_id = isset( $existing_children[ $sku ] ) ? (int) $existing_children[ $sku ] : 0;
+
+            // WooCommerce SKUs are global. If this SKU already exists elsewhere, never
+            // blindly call set_sku(), because that produces a fatal WC_Data_Exception.
+            if ( ! $variation_id ) {
+                $global_id = wc_get_product_id_by_sku( $sku );
+                if ( $global_id ) {
+                    $global_product = wc_get_product( $global_id );
+                    if ( $global_product && $global_product->is_type( 'variation' ) && (int) $global_product->get_parent_id() === (int) $product_id ) {
+                        $variation_id = (int) $global_id;
+                    } else {
+                        return new WP_Error( 'variation_sku_conflict', 'O SKU da variação ' . $sku . ' já existe no WooCommerce e pertence a outro produto. Nenhuma alteração foi feita nessa variação.' );
+                    }
+                }
+            }
+
             $wc_variation = $variation_id ? new WC_Product_Variation( $variation_id ) : new WC_Product_Variation();
             if ( ! $variation_id ) { $wc_variation->set_parent_id( $product_id ); }
-            $wc_variation->set_sku( $variation['sku'] );
-            if ( null !== $variation['price'] ) { $wc_variation->set_regular_price( (string) $variation['price'] ); }
-            $wc_variation->set_manage_stock( false );
-            $wc_variation->set_stock_status( ! empty( $variation['stock_out'] ) ? 'outofstock' : 'instock' );
-            $attrs = array();
-            if ( ! empty( $variation['color'] ) ) { $attrs['attribute_color'] = $variation['color']; }
-            if ( ! empty( $variation['size'] ) ) { $attrs['attribute_size'] = $variation['size']; }
-            if ( ! empty( $variation['capacity'] ) ) { $attrs['attribute_capacity'] = $variation['capacity']; }
-            $wc_variation->set_attributes( $attrs );
-            $wc_variation->save();
-            update_post_meta( $wc_variation->get_id(), '_swcs_stricker_sku', $variation['sku'] );
+
+            try {
+                $wc_variation->set_sku( $sku );
+                if ( null !== $variation['price'] ) { $wc_variation->set_regular_price( (string) $variation['price'] ); }
+                $wc_variation->set_manage_stock( false );
+                $wc_variation->set_stock_status( ! empty( $variation['stock_out'] ) ? 'outofstock' : 'instock' );
+                $attrs = array();
+                if ( ! empty( $variation['color'] ) ) { $attrs['attribute_color'] = $variation['color']; }
+                if ( ! empty( $variation['size'] ) ) { $attrs['attribute_size'] = $variation['size']; }
+                if ( ! empty( $variation['capacity'] ) ) { $attrs['attribute_capacity'] = $variation['capacity']; }
+                $wc_variation->set_attributes( $attrs );
+                $wc_variation->save();
+            } catch ( WC_Data_Exception $e ) {
+                return new WP_Error( 'variation_save_exception', 'Não foi possível salvar a variação ' . $sku . ': ' . $e->getMessage() );
+            }
+
+            update_post_meta( $wc_variation->get_id(), '_swcs_stricker_sku', $sku );
             update_post_meta( $wc_variation->get_id(), '_swcs_color_code', $variation['color_code'] );
             update_post_meta( $wc_variation->get_id(), '_swcs_image_reference', $variation['image'] );
             $count++;
