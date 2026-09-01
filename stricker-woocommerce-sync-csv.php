@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Stricker WooCommerce Catalog Sync CSV
  * Description: Downloads and prepares the Stricker catalog CSV files for WooCommerce synchronisation.
- * Version: 0.2.2
+ * Version: 0.2.3
  * Author: Fabio Veneroni
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -10,7 +10,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-define( 'SWCS_VERSION', '0.2.2' );
+define( 'SWCS_VERSION', '0.2.3' );
 define( 'SWCS_FILE', __FILE__ );
 define( 'SWCS_DIR', plugin_dir_path( __FILE__ ) );
 define( 'SWCS_URL', plugin_dir_url( __FILE__ ) );
