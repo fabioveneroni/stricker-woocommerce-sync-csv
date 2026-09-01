@@ -6,6 +6,7 @@ class SWCS_Admin {
         add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
         add_action( 'admin_post_swcs_save_settings', array( __CLASS__, 'save_settings' ) );
         add_action( 'admin_post_swcs_download', array( __CLASS__, 'download' ) );
+        add_action( 'admin_post_swcs_test_image', array( __CLASS__, 'test_image' ) );
     }
 
     public static function activate() {
@@ -32,6 +33,62 @@ class SWCS_Admin {
         wp_safe_redirect( add_query_arg( $args, admin_url( 'admin.php' ) ) ); exit;
     }
 
+    public static function test_image() {
+        if ( ! current_user_can( 'manage_options' ) || ! check_admin_referer( 'swcs_test_image' ) ) { wp_die( 'Acesso negado.' ); }
+        $reference = sanitize_text_field( wp_unslash( $_POST['product_reference'] ?? '' ) );
+        $product = self::find_product_for_reference( $reference );
+        $args = array( 'page' => 'swcs', 'image_reference' => $reference );
+        if ( is_wp_error( $product ) ) {
+            $args['image_error'] = rawurlencode( $product->get_error_message() );
+        } else {
+            $resolved = SWCS_Images::resolve_from_product( $product );
+            if ( is_wp_error( $resolved ) ) {
+                $args['image_error'] = rawurlencode( $resolved->get_error_message() );
+            } else {
+                $args['image_url'] = rawurlencode( $resolved['url'] );
+                $args['image_method'] = rawurlencode( $resolved['method'] );
+                $args['image_page'] = rawurlencode( $resolved['page_url'] ?? '' );
+            }
+        }
+        wp_safe_redirect( add_query_arg( $args, admin_url( 'admin.php' ) ) ); exit;
+    }
+
+    private static function find_product_for_reference( $reference ) {
+        if ( '' === $reference ) { return new WP_Error( 'missing_reference', 'Informe uma referência de produto.' ); }
+        foreach ( array( 'products', 'optionalscomplete' ) as $dataset ) {
+            $status = get_option( 'swcs_catalog_' . $dataset . '_status', array() );
+            if ( empty( $status['path'] ) || ! is_readable( $status['path'] ) ) { continue; }
+            $handle = fopen( $status['path'], 'rb' );
+            if ( ! $handle ) { continue; }
+            $delimiter = self::detect_delimiter( $handle );
+            $header = fgetcsv( $handle, 0, $delimiter );
+            if ( false === $header ) { fclose( $handle ); continue; }
+            if ( isset( $header[0] ) ) { $header[0] = preg_replace( '/^\xEF\xBB\xBF/', '', $header[0] ); }
+            $header = array_map( 'trim', $header );
+            while ( false !== ( $row = fgetcsv( $handle, 0, $delimiter ) ) ) {
+                $row = array_pad( $row, count( $header ), '' );
+                if ( count( $row ) > count( $header ) ) { $row = array_slice( $row, 0, count( $header ) ); }
+                $data = array_combine( $header, $row );
+                if ( isset( $data['ProdReference'] ) && trim( (string) $data['ProdReference'] ) === $reference ) {
+                    fclose( $handle );
+                    return SWCS_Mapper::product( $data );
+                }
+            }
+            fclose( $handle );
+        }
+        return new WP_Error( 'product_not_found', 'Produto ' . $reference . ' não encontrado nos CSVs baixados.' );
+    }
+
+    private static function detect_delimiter( $handle ) {
+        $position = ftell( $handle ); $sample = fgets( $handle ); fseek( $handle, $position );
+        $best = ','; $best_count = 0;
+        foreach ( array( ';', ',', "\t", '|' ) as $delimiter ) {
+            $count = substr_count( (string) $sample, $delimiter );
+            if ( $count > $best_count ) { $best = $delimiter; $best_count = $count; }
+        }
+        return $best;
+    }
+
     public static function page() {
         $datasets = array( 'producttypes' => 'Product Types', 'products' => 'Products', 'optionals' => 'Optionals', 'optionalsPrice' => 'Optionals Price', 'optionalscomplete' => 'Optionals Complete', 'customizationOptions' => 'Customization Options', 'customizationTables' => 'Customization Tables', 'colors' => 'Colors', 'stocks' => 'Stocks' );
         ?>
@@ -40,13 +97,22 @@ class SWCS_Admin {
             <?php if ( isset( $_GET['saved'] ) ) : ?><div class="notice notice-success"><p>Access key salva com sucesso.</p></div><?php endif; ?>
             <?php if ( isset( $_GET['success'] ) ) : ?><div class="notice notice-success"><p>Download de <?php echo esc_html( $_GET['dataset'] ?? '' ); ?> concluído com sucesso.</p></div><?php endif; ?>
             <?php if ( isset( $_GET['error'] ) ) : ?><div class="notice notice-error"><p><?php echo esc_html( wp_unslash( $_GET['error'] ) ); ?></p></div><?php endif; ?>
+            <?php if ( isset( $_GET['image_error'] ) ) : ?><div class="notice notice-error"><p>Teste de imagem: <?php echo esc_html( wp_unslash( $_GET['image_error'] ) ); ?></p></div><?php endif; ?>
+            <?php if ( isset( $_GET['image_url'] ) ) : ?><div class="notice notice-success"><p><strong>Imagem localizada.</strong><br>Referência: <?php echo esc_html( $_GET['image_reference'] ?? '' ); ?><br>Método: <?php echo esc_html( $_GET['image_method'] ?? '' ); ?><br>URL: <a href="<?php echo esc_url( wp_unslash( $_GET['image_url'] ) ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( wp_unslash( $_GET['image_url'] ) ); ?></a><?php if ( ! empty( $_GET['image_page'] ) ) : ?><br>Página de origem: <?php echo esc_html( wp_unslash( $_GET['image_page'] ) ); ?><?php endif; ?></p></div><?php endif; ?>
 
             <h2>Conexão</h2>
             <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-                <input type="hidden" name="action" value="swcs_save_settings">
-                <?php wp_nonce_field( 'swcs_save_settings' ); ?>
-                <table class="form-table"><tr><th><label for="swcs-access-key">Access Key</label></th><td><input id="swcs-access-key" name="access_key" type="password" class="regular-text" value="<?php echo esc_attr( SWCS_API::get_access_key() ); ?>" autocomplete="off"><p class="description">A chave é armazenada nas opções do WordPress e usada para construir as URLs oficiais de download CSV.</p></td></tr></table>
+                <input type="hidden" name="action" value="swcs_save_settings"><?php wp_nonce_field( 'swcs_save_settings' ); ?>
+                <table class="form-table"><tr><th><label for="swcs-access-key">Access Key</label></th><td><input id="swcs-access-key" name="access_key" type="password" class="regular-text" value="<?php echo esc_attr( SWCS_API::get_access_key() ); ?>" autocomplete="off"><p class="description">A chave é usada para construir as URLs oficiais de download CSV.</p></td></tr></table>
                 <?php submit_button( 'Salvar Access Key' ); ?>
+            </form>
+
+            <h2>Teste de imagem</h2>
+            <p>Não cria produtos nem adiciona imagens. Usa <code>MainImage</code> do CSV e tenta localizar a imagem correspondente na página oficial do produto.</p>
+            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                <input type="hidden" name="action" value="swcs_test_image"><?php wp_nonce_field( 'swcs_test_image' ); ?>
+                <input name="product_reference" type="text" class="regular-text" placeholder="Ex.: 11103" value="<?php echo esc_attr( $_GET['image_reference'] ?? '' ); ?>">
+                <?php submit_button( 'Testar imagem', 'secondary', 'submit', false ); ?>
             </form>
 
             <h2>Catálogos CSV</h2>
