@@ -4,6 +4,11 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
 /**
  * Creates/updates WooCommerce products from the local Stricker CSV catalog.
  * Images are intentionally not imported at this stage.
+ *
+ * Identity rules:
+ * - Parent products are identified by Stricker ProdReference.
+ * - Variations are identified by Stricker Sku/WebSku.
+ * - Stricker identity metadata is authoritative for future synchronisation.
  */
 class SWCS_Importer {
     public static function is_available() {
@@ -30,7 +35,14 @@ class SWCS_Importer {
         foreach ( $variation_rows as $row ) { $variations[] = SWCS_Mapper::variation( $row ); }
         $type = SWCS_Mapper::classification( $product, $variations );
 
-        $existing_id = wc_get_product_id_by_sku( $reference );
+        // The Stricker reference is the authoritative parent identity. Prefer our
+        // metadata over a WooCommerce SKU lookup so that an old/test SKU cannot
+        // accidentally create or update the wrong object.
+        $existing_id = self::find_parent_by_stricker_reference( $reference );
+        if ( ! $existing_id ) {
+            $existing_id = wc_get_product_id_by_sku( $reference );
+        }
+
         if ( $existing_id ) {
             $wc_product = wc_get_product( $existing_id );
         } else {
@@ -38,11 +50,12 @@ class SWCS_Importer {
         }
         if ( ! $wc_product ) { return new WP_Error( 'product_load_failed', 'Não foi possível carregar/criar o produto WooCommerce.' ); }
 
-        // If a product with this SKU exists but is not the expected parent, do not overwrite it.
         if ( $wc_product->get_id() && 'product' !== get_post_type( $wc_product->get_id() ) ) {
             return new WP_Error( 'parent_sku_conflict', 'O SKU ' . $reference . ' já está associado a outro tipo de objeto WooCommerce.' );
         }
 
+        // A product with the same Stricker reference must be unique. If stale
+        // metadata somehow points to a variation, abort instead of corrupting it.
         $wc_product->set_name( self::clean_name( $product['name'], $reference ) );
         $wc_product->set_description( wp_kses_post( $product['description'] ) );
         $wc_product->set_short_description( wp_kses_post( $product['short_description'] ) );
@@ -77,6 +90,21 @@ class SWCS_Importer {
         }
 
         return array( 'product_id' => $id, 'type' => $type, 'variations' => $created_variations );
+    }
+
+    private static function find_parent_by_stricker_reference( $reference ) {
+        $ids = get_posts( array(
+            'post_type'      => 'product',
+            'post_status'    => 'any',
+            'posts_per_page' => 2,
+            'fields'         => 'ids',
+            'meta_key'       => '_swcs_stricker_reference',
+            'meta_value'     => $reference,
+        ) );
+        if ( count( $ids ) > 1 ) {
+            return new WP_Error( 'duplicate_stricker_reference', 'A referência Stricker ' . $reference . ' está associada a mais de um produto WooCommerce. Limpe os duplicados antes de importar novamente.' );
+        }
+        return ! empty( $ids[0] ) ? (int) $ids[0] : 0;
     }
 
     private static function find_row( $dataset, $field, $value ) {
@@ -178,13 +206,30 @@ class SWCS_Importer {
         }, $attributes ) );
     }
 
+    private static function find_variation_by_stricker_sku( $product_id, $sku ) {
+        $ids = get_posts( array(
+            'post_type'      => 'product_variation',
+            'post_status'    => 'any',
+            'posts_per_page' => 2,
+            'fields'         => 'ids',
+            'post_parent'    => $product_id,
+            'meta_key'       => '_swcs_stricker_sku',
+            'meta_value'     => $sku,
+        ) );
+        if ( count( $ids ) > 1 ) {
+            return new WP_Error( 'duplicate_stricker_sku', 'O SKU Stricker ' . $sku . ' está associado a mais de uma variação do mesmo produto.' );
+        }
+        return ! empty( $ids[0] ) ? (int) $ids[0] : 0;
+    }
+
     private static function sync_variations( $product_id, $variations ) {
         $count = 0;
         $existing_children = array();
         $children = get_posts( array( 'post_type' => 'product_variation', 'post_parent' => $product_id, 'post_status' => 'any', 'numberposts' => -1, 'fields' => 'ids' ) );
         foreach ( $children as $child_id ) {
-            $sku = get_post_meta( $child_id, '_sku', true );
-            if ( $sku ) { $existing_children[ $sku ] = $child_id; }
+            $stricker_sku = get_post_meta( $child_id, '_swcs_stricker_sku', true );
+            $sku = $stricker_sku ? $stricker_sku : get_post_meta( $child_id, '_sku', true );
+            if ( $sku ) { $existing_children[ trim( (string) $sku ) ] = $child_id; }
         }
 
         foreach ( $variations as $variation ) {
@@ -192,9 +237,13 @@ class SWCS_Importer {
 
             $sku = trim( (string) $variation['sku'] );
             $variation_id = isset( $existing_children[ $sku ] ) ? (int) $existing_children[ $sku ] : 0;
+            if ( ! $variation_id ) {
+                $variation_id = self::find_variation_by_stricker_sku( $product_id, $sku );
+                if ( is_wp_error( $variation_id ) ) { return $variation_id; }
+            }
 
-            // WooCommerce SKUs are global. If this SKU already exists elsewhere, never
-            // blindly call set_sku(), because that produces a fatal WC_Data_Exception.
+            // Only use the global WooCommerce SKU lookup as a safety check. Never
+            // adopt an unrelated product/variation just because its WC SKU matches.
             if ( ! $variation_id ) {
                 $global_id = wc_get_product_id_by_sku( $sku );
                 if ( $global_id ) {
