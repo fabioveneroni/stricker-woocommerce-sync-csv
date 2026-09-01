@@ -49,9 +49,6 @@ class SWCS_Importer {
                 return new WP_Error( 'parent_sku_conflict', 'O SKU ' . $reference . ' está associado a outro tipo de objeto WooCommerce.' );
             }
 
-            // If the existing test/product record is simple but Stricker says it
-            // has variation dimensions, convert the product type before creating
-            // or updating variations. The existing product ID is preserved.
             if ( 'variable' === $type ) {
                 self::ensure_variable_product_type( $existing_id );
             }
@@ -69,7 +66,10 @@ class SWCS_Importer {
         $wc_product->set_short_description( wp_kses_post( $product['short_description'] ) );
         $wc_product->set_status( 'draft' );
         $wc_product->set_catalog_visibility( 'visible' );
-        $wc_product->set_sku( $reference );
+        $current_sku = (string) $wc_product->get_sku();
+        if ( '' === $current_sku || $current_sku === $reference ) {
+            $wc_product->set_sku( $reference );
+        }
 
         if ( 'simple' === $type ) {
             $first = ! empty( $variations[0] ) ? $variations[0] : array();
@@ -118,15 +118,35 @@ class SWCS_Importer {
         $ids = get_posts( array(
             'post_type'      => 'product',
             'post_status'    => 'any',
-            'posts_per_page' => 2,
+            'posts_per_page' => -1,
             'fields'         => 'ids',
             'meta_key'       => '_swcs_stricker_reference',
             'meta_value'     => $reference,
         ) );
-        if ( count( $ids ) > 1 ) {
-            return new WP_Error( 'duplicate_stricker_reference', 'A referência Stricker ' . $reference . ' está associada a mais de um produto WooCommerce. Limpe os duplicados antes de importar novamente.' );
+
+        if ( empty( $ids ) ) {
+            return 0;
         }
-        return ! empty( $ids[0] ) ? (int) $ids[0] : 0;
+
+        // Prefer an existing parent whose WooCommerce SKU is exactly the Stricker
+        // reference. This handles duplicate legacy/test records without deleting them.
+        foreach ( $ids as $id ) {
+            $product = wc_get_product( $id );
+            if ( $product && $product->get_sku() === $reference && $product->is_type( array( 'simple', 'variable' ) ) ) {
+                return (int) $id;
+            }
+        }
+
+        // If no exact-SKU parent exists, prefer a variable product, then the oldest
+        // product ID. This makes the reconciliation deterministic and conservative.
+        foreach ( $ids as $id ) {
+            $product = wc_get_product( $id );
+            if ( $product && $product->is_type( 'variable' ) ) {
+                return (int) $id;
+            }
+        }
+
+        return (int) $ids[0];
     }
 
     private static function find_row( $dataset, $field, $value ) {
