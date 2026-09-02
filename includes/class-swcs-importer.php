@@ -54,7 +54,7 @@ class SWCS_Importer {
         if ( ! $product ) return new WP_Error( 'product_load', 'Não foi possível carregar o produto WooCommerce.' );
 
         try {
-            // Stricker controls catalog content. WooCommerce controls editorial state.
+            // Stricker controls catalogue data. Existing WordPress/WooCommerce editorial state is preserved.
             $product->set_name( self::text( $row, 'Name' ) );
             $product->set_description( self::text( $row, 'Description' ) );
             $product->set_short_description( self::text( $row, 'ShortDescription' ) );
@@ -116,14 +116,30 @@ class SWCS_Importer {
         foreach ( $rows as $row ) {
             $mapped = SWCS_Mapper::variation( $row ); $sku = $mapped['sku']; if ( '' === $sku ) continue;
             $variation_id = isset( $existing[$sku] ) ? (int) $existing[$sku] : 0;
+
+            // A variation SKU is globally unique in WooCommerce. If it already exists, only
+            // adopt it when the record itself proves it belongs to this Stricker reference.
             if ( ! $variation_id && function_exists( 'wc_get_product_id_by_sku' ) ) {
                 $global_id = (int) wc_get_product_id_by_sku( $sku );
                 if ( $global_id ) {
                     $global = wc_get_product( $global_id );
-                    if ( $global && (int) $global->get_parent_id() === (int) $product_id ) $variation_id = $global_id;
-                    else return new WP_Error( 'duplicate_variation_sku', 'A variação ' . $sku . ' já pertence a outro produto WooCommerce (ID ' . $global_id . '). Nenhuma alteração foi feita nesta variação.' );
+                    $stored_reference = $global ? (string) $global->get_meta( '_swcs_stricker_reference', true ) : '';
+                    $global_is_variation = $global && $global instanceof WC_Product_Variation;
+                    $global_parent = $global ? (int) $global->get_parent_id() : 0;
+
+                    if ( $global_is_variation && $stored_reference === $reference ) {
+                        // This is an existing Stricker variation, even if its parent was changed
+                        // or the variation became detached. Reattach it to the canonical parent.
+                        $variation_id = $global_id;
+                    } elseif ( $global_is_variation && $global_parent === (int) $product_id ) {
+                        $variation_id = $global_id;
+                    } else {
+                        $owner_label = $global_is_variation ? 'variação WooCommerce' : 'produto WooCommerce';
+                        return new WP_Error( 'duplicate_variation_sku', 'A variação ' . $sku . ' já pertence a outro ' . $owner_label . ' (ID ' . $global_id . '). Nenhuma alteração foi feita nesta variação.' );
+                    }
                 }
             }
+
             $variation = $variation_id ? wc_get_product( $variation_id ) : new WC_Product_Variation();
             if ( ! $variation ) return new WP_Error( 'variation_load', 'Não foi possível carregar a variação ' . $sku . '.' );
             try {
